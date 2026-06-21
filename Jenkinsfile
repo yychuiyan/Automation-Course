@@ -85,12 +85,7 @@ pipeline {
         }
 
         failure {
-            // 失败通知 — 打开注释并配好 SMTP 即可用
-            // emailext(
-            //     subject: "[Test Failed] ${env.JOB_NAME} - Build #${env.BUILD_NUMBER}",
-            //     body: "测试失败，查看报告: ${env.BUILD_URL}",
-            //     to: 'team@example.com'
-            // )
+            echo "测试失败！查看报告: ${env.BUILD_URL}"
         }
     }
 }
