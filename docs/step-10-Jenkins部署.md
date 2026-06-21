@@ -1,675 +1,419 @@
 # Jenkins 部署指南
 
-> 从零搭建 Jenkins，运行 Playwright 自动化测试项目。
+> 从零搭建 Jenkins，Docker 容器化运行 Playwright 自动化测试。适配 OpenCloudOS / CentOS / Ubuntu，已踩坑验证。
 
-## 一、整体架构
+## 一、为什么用 Docker + Jenkins
+
+### 1.1 问题背景
+
+Playwright 自动化测试要跑起来，依赖链路长：
+
+```
+测试代码 → Node.js → @playwright/test → Chromium 浏览器 → 系统库（libatk、libcups 等 20+）
+```
+
+直接装在宿主机（裸机）会碰到：
+
+| 问题                        | 具体表现                                                                                   |
+| --------------------------- | ------------------------------------------------------------------------------------------ |
+| OS 不在 Playwright 支持列表 | OpenCloudOS / CentOS 报 `BEWARE: your OS is not officially supported`                      |
+| 系统依赖包名不一致          | `libasound2t64` 是 Ubuntu 24.04 名字，Debian Bookworm 叫 `libasound2`，CentOS 完全不认识   |
+| `install-deps` 调错包管理器 | Playwright 检测到 OpenCloudOS 后仍尝试 `apt-get`（而非 `dnf`），直接报 `command not found` |
+| 每台机器都要重复配置        | Node 版本、npm 源、浏览器下载、系统依赖——换一台服务器全部重来                              |
+| Chromium 下载慢             | 国内服务器拉 `cdn.playwright.dev` 约 300MB，常见 0% 卡死                                   |
+
+### 1.2 Docker 解决思路
+
+把这些依赖**全部烘焙进 Docker 镜像**，Jenkins 启动容器直接跑测试：
+
+```
+Docker 镜像（playwright-runner）         Jenkins
+─────────────────────────────────       ────────────────────────
+ Node.js 22 + npm                       调度触发（定时 / Webhook）
+ Playwright @playwright/test            拉取 Git 代码
+ Chromium 浏览器（~300MB）               注入凭证（账号密码等敏感信息）
+ 系统依赖（libatk、nss 等 20+ 包）       选择测试级别（smoke / regression / full）
+ 项目 npm 依赖（node_modules）            归档测试报告（HTML Report）
+                                        发送失败通知
+```
+
+### 1.3 分工明细
+
+| 层           |          负责方           | 具体内容                                   | 变更频率              |
+| ------------ | :-----------------------: | ------------------------------------------ | --------------------- |
+| **运行环境** |          Docker           | Node 22、Chromium、系统库、npm 全局配置    | 几乎不变              |
+| **浏览器**   |          Docker           | Chromium 148（匹配 @playwright/test 1.60） | Playwright 升级时更新 |
+| **项目依赖** |     Docker + Jenkins      | `npm ci`（镜像有层缓存，增量更新）         | package.json 变更时   |
+| **业务代码** |  Jenkins（Git Checkout）  | pages/、tests/、utils/                     | 高频                  |
+| **敏感信息** |  Jenkins（Credentials）   | 账号密码、被测地址                         | 偶尔                  |
+| **触发策略** |          Jenkins          | 定时 cron、Webhook、手动 Build             | 配置级                |
+| **报告展示** | Jenkins（HTML Publisher） | Playwright HTML Report                     | 每次构建              |
+
+### 1.4 一句话总结
+
+> **Docker 管"能跑"，Jenkins 管"怎么跑"。** Docker 保证环境一致（换台机器也能跑），Jenkins 保证流程自动（到点了自己跑、跑完出报告）。
+
+---
+
+## 二、最终架构
 
 ```
 Jenkins Master（调度 + 报告）
     │
-    └── Jenkins Agent / 本机执行器（运行 Playwright 测试）
-            │
-            ├── Node.js 22 LTS
-            ├── Playwright + Chromium
-            └── 系统依赖（libatk、libcups 等）
+    └── docker run playwright-runner 容器
+            ├── Node.js 22 + npm（镜像内置）
+            ├── Chromium 浏览器（镜像内置 /opt/playwright-browsers）
+            ├── 系统依赖（libatk、libcups 等，镜像内置）
+            └── Playwright + 项目依赖（镜像内置）
+
+凭证注入：Jenkins Credentials → -e 环境变量 → 容器内 Playwright 读取
 ```
 
-Jenkins Master 负责拉代码、调度任务、展示报告；实际测试在 Agent 节点上跑（也可以是 Master 本机）。
+**为什么用 Docker？** OpenCloudOS 不在 Playwright 官方支持列表，`install-deps` 调 apt-get 而 OpenCloudOS 用 dnf。Docker 镜像统一 Debian 环境，彻底消除 OS 差异。
 
 ---
 
 ## 二、服务器环境准备
 
-### 2.1 操作系统选择
+### 2.1 最低要求
 
-| 系统                     | 推荐场景                          |
-| ------------------------ | --------------------------------- |
-| Ubuntu 22.04 / 24.04 LTS | 生产环境首选，Playwright 支持最好 |
-| CentOS 7/8 / Rocky 9     | 公司指定时使用                    |
-| macOS                    | 本地调试 / 小团队                 |
+| 资源     | 要求                                       |
+| -------- | ------------------------------------------ |
+| 操作系统 | OpenCloudOS 9 / CentOS 7/8 / Ubuntu 22.04+ |
+| CPU      | 2 核                                       |
+| 内存     | 4 GB（Chromium headless 吃内存）           |
+| 磁盘     | 10 GB 可用                                 |
+| Docker   | 已安装（`docker --version`）               |
 
-以下以 **Ubuntu 24.04** 为例，其他系统思路一致。
-
-### 2.2 安装 Jenkins
+### 2.2 安装 Java 21 + Jenkins
 
 ```bash
-# 1. 安装 Java 21（Jenkins 要求）
-sudo apt update
-sudo apt install -y openjdk-21-jdk
+# 1. 安装 Java 21
+sudo yum install -y java-21-openjdk   # CentOS/OpenCloudOS
+# sudo apt install -y openjdk-21-jdk   # Ubuntu
 
-# 2. 添加 Jenkins 官方源
-sudo wget -O /usr/share/keyrings/jenkins-keyring.asc \
-  https://pkg.jenkins.io/debian-stable/jenkins.io-2023.key
-echo "deb [signed-by=/usr/share/keyrings/jenkins-keyring.asc] \
-  https://pkg.jenkins.io/debian-stable binary/" | \
-  sudo tee /etc/apt/sources.list.d/jenkins.list
+# 2. 添加 Jenkins 源并安装（以 OpenCloudOS/CentOS 为例）
+sudo wget -O /etc/yum.repos.d/jenkins.repo \
+  https://pkg.jenkins.io/redhat-stable/jenkins.repo
+sudo rpm --import https://pkg.jenkins.io/redhat-stable/jenkins.io-2023.key
+sudo yum install -y jenkins
 
-# 3. 安装 Jenkins
-sudo apt update
-sudo apt install -y jenkins
-
-# 4. 启动并设为开机自启
+# 3. 启动
 sudo systemctl enable jenkins
 sudo systemctl start jenkins
 
-# 5. 查看初始密码
+# 4. 查看初始密码
 sudo cat /var/lib/jenkins/secrets/initialAdminPassword
 ```
 
-浏览器访问 `http://<服务器IP>:8080`，输入初始密码，按向导安装推荐插件即可。
+浏览器访问 `http://<服务器IP>:8080`，输入初始密码，安装推荐插件。
 
-### 2.3 安装 Node.js 22（通过 nvm）
+### 2.3 配置 Docker 国内镜像加速
 
 ```bash
-# 切换到 jenkins 用户（或用 root 装到全局）
-sudo -u jenkins -i
-
-# 安装 nvm
-curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh | bash
-source ~/.bashrc
-
-# 安装 Node 22 LTS
-nvm install 22
-nvm alias default 22
-
-# 验证
-node --version   # v22.x.x
-npm --version    # 10.x.x
+sudo mkdir -p /etc/docker
+sudo tee /etc/docker/daemon.json <<'EOF'
+{
+    "registry-mirrors": [
+        "https://docker.1ms.run",
+        "https://docker.xuanyuan.me"
+    ]
+}
+EOF
+sudo systemctl daemon-reload
+sudo systemctl restart docker
 ```
 
-> **生产环境也可以用 apt 直接装**：`curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash - && sudo apt install -y nodejs`。nvm 的优势是版本切换灵活，但 CI 环境通常固定一个版本就够了。
+验证：`docker pull node:22-slim` 能拉下来。
 
-### 2.4 设置 npm 国内镜像（国内服务器）
+### 2.4 配置 npm 国内镜像（宿主机可选）
 
 ```bash
 npm config set registry https://registry.npmmirror.com/
 ```
 
-### 2.5 安装 Playwright 系统依赖
-
-Chromium 在 headless 模式下需要大量系统库，漏装会报奇怪的错误（`error while loading shared libraries`）。
+### 2.5 将 jenkins 用户加入 docker 组
 
 ```bash
-# 一键安装 Playwright 所需的全部系统依赖
-npx playwright install-deps chromium
+sudo usermod -aG docker jenkins
+sudo systemctl restart jenkins
 
-# 如果上面命令不可用，手动安装常用依赖：
-sudo apt install -y \
-  libatk-bridge2.0-0 \
-  libatk1.0-0 \
-  libcups2 \
-  libdrm2 \
-  libgbm1 \
-  libgtk-3-0 \
-  libnspr4 \
-  libnss3 \
-  libxcomposite1 \
-  libxdamage1 \
-  libxfixes3 \
-  libxkbcommon0 \
-  libxrandr2 \
-  xdg-utils \
-  fonts-noto-color-emoji \
-  libxshmfence1
+# 验证
+sudo -u jenkins docker ps
 ```
 
-> **重点**：这一步是踩坑重灾区。如果 Jenkins 跑测试时报 `host system is missing dependencies`，就是系统依赖没装全。
-
-### 2.6 安装 Chromium 浏览器
-
-```bash
-# 在项目目录下执行（或全局安装）
-npx playwright install chromium
-```
+> 不报 `permission denied` 就 OK。
 
 ---
 
 ## 三、Jenkins 插件安装
 
-进入 **Manage Jenkins → Plugins → Available plugins**，搜索安装以下插件：
+**Manage Jenkins → Plugins → Available plugins**，安装：
 
-| 插件                    | 用途                                 |
-| ----------------------- | ------------------------------------ |
-| **NodeJS Plugin**       | 管理 Node.js 版本，自动注入 PATH     |
-| **HTML Publisher**      | 发布 Playwright HTML 报告            |
-| **Git Plugin**          | 拉取 Git 仓库（通常已自带）          |
-| **Credentials Binding** | 注入敏感信息（账号密码等）到构建环境 |
-| **Build Timestamp**     | 给构建加时间戳                       |
+| 插件                    | 用途                      |
+| ----------------------- | ------------------------- |
+| **Docker Pipeline**     | 在容器内运行 Job          |
+| **HTML Publisher**      | 发布 Playwright HTML 报告 |
+| **Git Plugin**          | 拉仓库（通常已自带）      |
+| **Credentials Binding** | 注入敏感信息到构建环境    |
 
-装完重启 Jenkins。
-
----
-
-## 四、配置 Node.js 工具
-
-**Manage Jenkins → Tools → NodeJS installations → Add NodeJS**：
-
-- Name: `Node 22`
-- 勾选 "Install automatically"
-- Version: 选择 `Node.js 22.x LTS`
-- 保存
-
-这样每个 Job 配置时引用 "Node 22"，Jenkins 会自动下载和管理该版本。
+装完重启。
 
 ---
 
-## 五、凭证配置
+## 四、凭证配置
 
 **Manage Jenkins → Credentials → System → Global credentials → Add Credentials**：
 
-### 5.1 Git 仓库凭证（如私有仓库需要）
+| 凭证 ID               | Kind        | Secret                          |
+| --------------------- | ----------- | ------------------------------- |
+| `TEST_BASE_URL`       | Secret text | `https://testing.yychuiyan.com` |
+| `TEST_ADMIN_USERNAME` | Secret text | `炊烟1号`                       |
+| `TEST_ADMIN_PASSWORD` | Secret text | `admin123`                      |
+| `TEST_USER_USERNAME`  | Secret text | `炊烟2号`                       |
+| `TEST_USER_PASSWORD`  | Secret text | `user123`                       |
 
-- Kind: `Username with password` / `SSH Username with private key`
-- Scope: Global
-- ID: `git-repo-credential`
-
-### 5.2 测试账号凭证
-
-把 `.env` 里的敏感信息创建为 Secret Text：
-
-- Kind: `Secret text`
-- ID: `TEST_ADMIN_USERNAME`
-- Secret: `炊烟1号`
-
-依此类推创建：
-
-- `TEST_ADMIN_PASSWORD` → `admin123`
-- `TEST_USER_USERNAME` → `炊烟2号`
-- `TEST_USER_PASSWORD` → `user123`
-- `TEST_BASE_URL` → `https://testing.yychuiyan.com`
-
-> **Why**：`.env` 文件不入 Git（已在 `.gitignore` 中），敏感信息通过 Jenkins 凭证注入，安全且可审计。
+> **Why**：`.env` 不入 Git，敏感信息通过 Jenkins 凭证注入，安全可审计。ID 必须与 Jenkinsfile 中 `credentials('XXX')` 完全一致。
 
 ---
 
-## 六、Jenkins Pipeline（声明式）
+## 五、构建 Docker 镜像
 
-在项目根目录新建 `Jenkinsfile`，直接放仓库里：
+### 5.1 为什么不在 Jenkins 里 build
 
-```groovy
-pipeline {
-    agent any
+> Playwright Chromium 下载约 300MB，服务器 CDN 通常很慢（国内常见 0% 卡死）。
+> 在本地 Mac/Windows（带宽快）构建镜像后传服务器，一劳永逸。
 
-    // 环境变量：在构建时从 Jenkins 凭证注入
-    environment {
-        BASE_URL = credentials('TEST_BASE_URL')
-        ADMIN_USERNAME = credentials('TEST_ADMIN_USERNAME')
-        ADMIN_PASSWORD = credentials('TEST_ADMIN_PASSWORD')
-        USER_USERNAME = credentials('TEST_USER_USERNAME')
-        USER_PASSWORD = credentials('TEST_USER_PASSWORD')
-        // 标记 CI 环境，playwright.config.ts 会读取
-        CI = 'true'
-    }
+### 5.2 关键文件
 
-    // 可手动选择测试级别
-    parameters {
-        choice(
-            name: 'TEST_LEVEL',
-            choices: ['smoke', 'regression', 'full'],
-            description: 'smoke=P0冒烟(2min) | regression=P0+P1回归(5min) | full=全量(8min)'
-        )
-    }
+项目内已有三个文件配合 Docker 部署：
 
-    stages {
-        stage('Checkout') {
-            steps {
-                checkout scm
-            }
-        }
+| 文件            | 作用                                                                   |
+| --------------- | ---------------------------------------------------------------------- |
+| `Dockerfile`    | 定义镜像：Node 22 + Playwright + Chromium + 系统依赖                   |
+| `.dockerignore` | 排除 `.env`、`auth-*.json` 不入镜像，防止本地配置污染                  |
+| `Jenkinsfile`   | Jenkins Pipeline：Docker agent → 拉代码 → `npm ci` → 跑测试 → 发布报告 |
 
-        stage('Install Dependencies') {
-            steps {
-                // NodeJS 插件自动将 node/npm 加入 PATH
-                sh 'node --version'
-                sh 'npm --version'
-                sh 'npm ci'  // ci 比 install 更快更严格（要求 lock 文件一致）
-            }
-        }
+### 5.3 本地构建 + 传服务器
 
-        stage('Install Playwright Browser') {
-            steps {
-                sh 'npx playwright install chromium'
-            }
-        }
+Mac（Apple Silicon 注意加 `--platform`）：
 
-        stage('Run Tests') {
-            steps {
-                script {
-                    // 根据参数选择测试命令
-                    def testCmd = ''
-                    switch (params.TEST_LEVEL) {
-                        case 'smoke':
-                            testCmd = 'npm run test:smoke'
-                            break
-                        case 'regression':
-                            testCmd = 'npm run test:regression'
-                            break
-                        case 'full':
-                            testCmd = 'npm test'
-                            break
-                    }
-                    sh testCmd
-                }
-            }
-        }
-    }
+```bash
+cd /path/to/Automation-Course
+git pull origin master
 
-    post {
-        always {
-            // 无论成功失败，都归档报告
-            archiveArtifacts artifacts: 'test-results/**, reports/**', allowEmptyArchive: true
+# Apple Silicon 必须指定平台
+docker build --platform linux/amd64 -t playwright-runner .
 
-            // 发布 HTML 报告
-            publishHTML(
-                target: [
-                    allowMissing: false,
-                    alwaysLinkToLastBuild: true,
-                    keepAll: true,
-                    reportDir: 'reports/playwright-report',
-                    reportFiles: 'index.html',
-                    reportName: 'Playwright Test Report'
-                ]
-            )
-        }
-
-        failure {
-            // 失败时发邮件通知（需先配置 SMTP）
-            // emailext(
-            //     subject: "[Test Failed] \${env.JOB_NAME} - Build #\${env.BUILD_NUMBER}",
-            //     body: "测试失败，查看报告: \${env.BUILD_URL}",
-            //     to: 'team@example.com'
-            // )
-        }
-    }
-}
+# 打包传输
+docker save playwright-runner | gzip > /tmp/playwright-runner.tar.gz
+scp /tmp/playwright-runner.tar.gz root@<服务器IP>:/tmp/
 ```
 
+服务器加载：
+
+```bash
+docker load < /tmp/playwright-runner.tar.gz
+```
+
+### 5.4 验证镜像
+
+```bash
+docker run --rm \
+  -e BASE_URL=https://testing.yychuiyan.com \
+  -e ADMIN_USERNAME=炊烟1号 \
+  -e ADMIN_PASSWORD=admin123 \
+  -e USER_USERNAME=炊烟2号 \
+  -e USER_PASSWORD=user123 \
+  playwright-runner npm run test:smoke
+```
+
+期望输出 `14 passed`。
+
 ---
 
-## 七、Jenkins Job 创建
+## 六、Jenkins Job 创建
 
-### 7.1 创建 Pipeline Job
-
-1. **New Item** → 输入名称 `Playwright-Automation-Course` → 选择 **Pipeline** → OK
-2. 在 Pipeline 配置中：
+1. **New Item** → 输入名称 → 选择 **Pipeline** → OK
+2. Pipeline 配置：
    - **Definition**: `Pipeline script from SCM`
-   - **SCM**: Git
-   - **Repository URL**: 你的仓库地址
-   - **Credentials**: 选择 5.1 创建的 Git 凭证
-   - **Branches to build**: `*/master`（或你的主分支）
+   - **SCM**: Git，填 `git@github.com:yychuiyan/Automation-Course.git`
+   - **Branches to build**: `*/master`
    - **Script Path**: `Jenkinsfile`
-3. 勾选 **"This project is parameterized"** — Jenkins 会从 Jenkinsfile 的 `parameters` 自动生成（如果已存在同名参数则手动配置）
-
-### 7.2 定时触发（Build Triggers）
-
-**回归测试** — 每日凌晨 3:00 跑 P0+P1：
-
-```
-H 3 * * *
-```
-
-在 Job 配置 → Build Triggers → **Build periodically** → 填入上面的 cron：
-
-```
-H 3 * * *
-```
-
-> Jenkins cron 格式：`MINUTE HOUR DOM MONTH DOW`，`H` 表示 Jenkins 自动分散执行时间避免雪崩。
-
-### 7.3 Webhook 触发（PR 门禁）
-
-如果仓库支持 webhook（GitHub / GitLab / Gitee），可以做到每次 PR 自动跑冒烟测试：
-
-**GitHub 示例**：
-
-1. Jenkins 安装 **GitHub Integration** 插件
-2. GitHub 仓库 Settings → Webhooks → Add webhook
-3. Payload URL: `http://<jenkins-server>:8080/github-webhook/`
-4. Content type: `application/json`
-5. 事件：`Pull requests`
-6. Jenkinsfile 加一个 trigger：
-
-```groovy
-triggers {
-    githubPush()  // 或 genericTrigger 等
-}
-```
-
-> 详细 webhook 配置因仓库平台不同而异，核心思路一致：push/pr 事件 → POST 到 Jenkins → Jenkins 拉代码跑流水线。
+3. **关于参数**：`TEST_LEVEL` 下拉选择框 **不需要在 Jenkins UI 手动配置**。Jenkinsfile 里 `parameters {}` 块已定义，Jenkins 首次解析后自动在 Job 页面生成 `Build with Parameters` 按钮和下拉菜单。
+4. 构建策略（可选）：
+   - PR 门禁：`npm run test:smoke`（Webhook 触发）
+   - 每日回归：`H 3 * * *`（凌晨 3 点）
 
 ---
 
-## 八、多 Job 拆分方案（进阶）
+## 七、触发策略
 
-以上是"一个 Job 万能"方案，够小团队用了。如果测试规模增长，建议拆成独立 Job：
+| 触发时机      | Job 参数     | 耗时   |
+| ------------- | ------------ | ------ |
+| PR Webhook    | `smoke`      | ~2 min |
+| 每日凌晨 3:00 | `regression` | ~5 min |
+| 发版前手动    | `full`       | ~8 min |
 
-| Job 名称        | 触发时机      | 测试命令                  | 超时  |
-| --------------- | ------------- | ------------------------- | ----- |
-| `PW-Smoke`      | PR Webhook    | `npm run test:smoke`      | 5min  |
-| `PW-Regression` | 每日凌晨 3:00 | `npm run test:regression` | 10min |
-| `PW-Full`       | 手动 / 发版前 | `npm test`                | 15min |
-
-拆分的好处：
-
-- 门禁 Job（Smoke）必须通过才允许合并，单独配置 Required Checks
-- 回归 Job 即使失败也不会阻塞 PR
-- 资源隔离，高峰期互不影响
+Jenkins 定时配置：**Build Triggers → Build periodically** → `H 3 * * *`
 
 ---
 
-## 九、常见问题排查
+## 八、文件清单
 
-### 9.1 `host system is missing dependencies`
-
-```
-╔══════════════════════════════════════════════════════╗
-║ Host system is missing dependencies to run browsers ║
-╚══════════════════════════════════════════════════════╝
-```
-
-**原因**：Chromium headless 需要的系统库缺失。
-
-**解决**：
-
-```bash
-npx playwright install-deps chromium
-# 或手动安装（见 2.5）
-```
-
-### 9.2 `browser closed unexpectedly` / 测试全部超时
-
-**原因**：通常是系统资源不足（内存/磁盘），或浏览器没装。
-
-**检查**：
-
-```bash
-free -h           # 内存剩余
-df -h             # 磁盘剩余
-npx playwright install --dry-run  # 检查浏览器安装状态
-```
-
-Jenkins Agent 至少需要 **2GB 可用内存**。
-
-### 9.3 权限问题（`EACCES: permission denied`）
-
-**原因**：Jenkins 用户对 workspace 无写权限。
-
-**解决**：
-
-```bash
-sudo chown -R jenkins:jenkins /var/lib/jenkins/workspace
-```
-
-### 9.4 认证失败（`auth.setup.ts` 跑不过）
-
-**原因**：Jenkins 环境没读到环境变量里的账号密码。
-
-**检查**：
-
-1. Jenkins 凭证 ID 是否与 Jenkinsfile 中 `credentials('XXX')` 一致
-2. `playwright.config.ts` 中 `dotenv/config` 会加载 `.env`，但 `.env` 不在仓库里 — 确认 Jenkinsfile 的 `environment` 块覆盖了所有必需变量
-
-### 9.5 npm install 太慢
-
-**解决**：
-
-```bash
-npm config set registry https://registry.npmmirror.com/
-```
-
-在 Jenkinsfile 的 `Install Dependencies` 阶段加一行：
-
-```groovy
-sh 'npm config set registry https://registry.npmmirror.com/'
-```
-
-或者 Jenkins 服务器全局设置一次即可。
-
----
-
-## 十、一条龙部署清单
-
-按顺序执行，大约 30 分钟完成首次部署：
+项目中和 Jenkins 部署相关的文件：
 
 ```
-□ 1. 准备一台 Ubuntu 24.04 服务器（2C4G 起步）
-□ 2. 安装 Java 21 + Jenkins → 浏览器打开完成初始化
-□ 3. 安装 Node.js 22 + npm 国内镜像
-□ 4. 安装 Playwright 系统依赖 + Chromium 浏览器
-□ 5. 安装 Jenkins 插件（NodeJS、HTML Publisher、Credentials）
-□ 6. 配置 NodeJS Tool → Node 22
-□ 7. 创建 Git 凭证 + 测试账号凭证
-□ 8. 项目根目录添加 Jenkinsfile（上面的内容）
-□ 9. Jenkins 创建 Pipeline Job → 指向仓库 + Jenkinsfile
-□ 10. 配置定时触发 + Webhook
-□ 11. 手动构建一次 → 验证通过 → 查看 HTML 报告
+├── Dockerfile              # 镜像定义
+├── .dockerignore           # 排除 .env / auth 文件入镜像
+├── Jenkinsfile             # Jenkins Pipeline（Docker agent）
+└── docs/step-10-Jenkins部署.md  # 本文档
 ```
 
 ---
 
-## 十一、验证安装配置
+## 九、常见问题排查（已踩坑验证）
 
-> 每完成一步安装，跑对应的验证命令，输出结果匹配"通过标准"才算 OK。
-
-### 11.1 验证 Java
-
-```bash
-java --version
-```
-
-**通过标准** — 输出版本 ≥ 21，类似：
+### 9.1 `docker build` 卡在 FROM node:22-slim
 
 ```
-openjdk 21.0.x 2024-xx-xx
+DeadlineExceeded: failed to resolve source metadata for docker.io/library/node:22-slim
 ```
 
-❌ 不通过 — `command not found` 或版本低于 17（Jenkins 新版本要求 Java 17+，推荐 21）。
+**原因**：Docker Hub 被墙。
+
+**解决**：配国内镜像源（见 2.3）。
 
 ---
 
-### 11.2 验证 Jenkins 运行状态
-
-```bash
-sudo systemctl status jenkins
-```
-
-**通过标准** — 看到 `active (running)`：
+### 9.2 `E: Unable to locate package libasound2t64`
 
 ```
-Active: active (running) since ...
+E: Unable to locate package libasound2t64
 ```
 
-再浏览器访问 `http://<服务器IP>:8080`，能打开 Jenkins 页面（已完成初始化解锁）。
+**原因**：手动写死的包名不匹配 Debian Bookworm（`libasound2t64` 是 Ubuntu 24.04+ 的名字）。
+
+**解决**：Dockerfile 里用 `npx playwright install-deps chromium` 自动识别系统版本装对应包，不要手动列包名。
 
 ---
 
-### 11.3 验证 Node.js
+### 9.3 镜像传到服务器 `exec format error`
 
-```bash
-node --version   # 期望 v22.x.x
-npm --version    # 期望 10.x.x
+```
+WARNING: The requested image's platform (linux/arm64) does not match
+the detected host platform (linux/amd64/v3)
+exec /usr/local/bin/docker-entrypoint.sh: exec format error
 ```
 
-**通过标准** — 版本号正确输出，且 Jenkins 用户也能执行：
+**原因**：Mac Apple Silicon 打出来的镜像默认 ARM 架构，服务器是 x86_64。
 
-```bash
-sudo -u jenkins node --version   # 同样输出 v22.x.x
-```
-
-> 如果 jenkins 用户报 `command not found`，说明 Node 只装给了 root/当前用户。解决：用 nvm 装给 jenkins 用户，或 apt 全局安装。
+**解决**：`docker build --platform linux/amd64 -t playwright-runner .`
 
 ---
 
-### 11.4 验证 Playwright 系统依赖
-
-```bash
-npx playwright install-deps chromium --dry-run 2>&1
-```
-
-**通过标准** — 输出类似：
+### 9.4 `npm ci` 报 `EACCES: permission denied`
 
 ```
-Playwright recommends installing the following packages:
-# 这里列出包名…
+npm error code EACCES
+npm error path /.npm
+Your cache folder contains root-owned files
 ```
 
-如果所有包后面都标了 `(already installed)`，说明依赖齐全。
+**原因**：Dockerfile 里 `npm ci` 以 root 运行创建缓存 `/.npm`。Jenkins 启动容器时 `-u 993:993`（jenkins 用户），后续 `npm ci` 无权限写入。
 
-或者更直接：**直接尝试安装 Chromium 浏览器并执行依赖检查：**
+**解决**：Dockerfile 里加上：
 
-```bash
-npx playwright install chromium
-npx playwright install-deps chromium
+```dockerfile
+RUN mkdir -p /.npm && chmod 777 /.npm && npm ci
 ```
-
-**通过标准** — `install` 输出 `already installed` 或正常下载完成；`install-deps` 不报错。
 
 ---
 
-### 11.5 验证 Chromium 浏览器
-
-```bash
-npx playwright install chromium --dry-run
-```
-
-**通过标准** — 输出 `Chromium … is already installed`。
-
-或者直接跑一个最小测试验证浏览器能启动（不需要项目代码）：
-
-```bash
-node -e "
-const { chromium } = require('playwright');
-(async () => {
-  const browser = await chromium.launch({ headless: true });
-  console.log('Chromium 启动成功:', browser.version());
-  await browser.close();
-})();
-"
-```
-
-**通过标准** — 输出 `Chromium 启动成功: …`，没有报错。
-
----
-
-### 11.6 验证 Jenkins 插件
-
-**Manage Jenkins → Plugins → Installed plugins**，搜索确认以下插件在列表中：
-
-| 插件                | 状态要求     |
-| ------------------- | ------------ |
-| NodeJS Plugin       | ✅ Installed |
-| HTML Publisher      | ✅ Installed |
-| Git Plugin          | ✅ Installed |
-| Credentials Binding | ✅ Installed |
-
-**通过标准** — 四个插件状态都是 `Enabled`。
-
----
-
-### 11.7 验证 NodeJS 工具配置
-
-**Manage Jenkins → Tools → NodeJS installations**，确认：
-
-- 有一条名为 `Node 22` 的配置
-- 勾选了 "Install automatically"
-- 版本选择了 `Node.js 22.x LTS`
-
-**通过标准** — 列表中存在 `Node 22` 条目。
-
----
-
-### 11.8 验证凭证
-
-**Manage Jenkins → Credentials → System → Global credentials**，确认存在以下条目：
-
-| ID                    | Kind        | 用途         |
-| --------------------- | ----------- | ------------ |
-| `TEST_BASE_URL`       | Secret text | 被测环境地址 |
-| `TEST_ADMIN_USERNAME` | Secret text | 管理员账号   |
-| `TEST_ADMIN_PASSWORD` | Secret text | 管理员密码   |
-| `TEST_USER_USERNAME`  | Secret text | 普通用户账号 |
-| `TEST_USER_PASSWORD`  | Secret text | 普通用户密码 |
-
-**通过标准** — 5 个凭证都在列表中，ID 拼写与 Jenkinsfile 中 `credentials('XXX')` 完全一致。
-
----
-
-### 11.9 验证 Git 拉取
-
-```bash
-# 在服务器上手动 clone 一次，确认网络和凭证没问题
-cd /tmp
-git clone <你的仓库地址>
-cd Automation-Course
-ls Jenkinsfile   # 确认 Jenkinsfile 在根目录
-```
-
-**通过标准** — clone 成功，`Jenkinsfile` 文件存在。
-
----
-
-### 11.10 验证项目依赖安装
-
-在 clone 下来的目录里：
-
-```bash
-cd /tmp/Automation-Course
-npm ci
-```
-
-**通过标准** — 正常结束，没有 `ERR!` 报错。`node_modules/` 目录生成。
-
----
-
-### 11.11 终局验证：手动触发一次 Jenkins 构建
-
-以上全部通过后，在 Jenkins 里：
-
-1. 进入 Job → **Build with Parameters**
-2. 选择 `smoke` → **Build**
-3. 等待构建完成
-
-**通过标准** — 四个 Stage 全部绿色：
+### 9.5 浏览器找不到
 
 ```
-Checkout                         ✓
-Install Dependencies             ✓
-Install Playwright Browser       ✓
-Run Tests                        ✓
+Executable doesn't exist at /.cache/ms-playwright/...
 ```
 
-点左侧 **Playwright Test Report** 能看到 HTML 报告，测试结果与本地一致。
+**原因**：Docker 构建时浏览器装到 `/root/.cache/ms-playwright/`（root 的 home）。Jenkins 以 jenkins 用户运行容器，Playwright 在 `/` 下找。
 
-> 🎉 到这就算全部搞定了。
-
----
-
-### 验证速查表
-
-| 步骤     | 命令                                        | 关键关键词          |
-| -------- | ------------------------------------------- | ------------------- |
-| Java     | `java --version`                            | `21.0`              |
-| Jenkins  | `systemctl status jenkins`                  | `active (running)`  |
-| Node     | `node --version`                            | `v22.`              |
-| 系统依赖 | `npx playwright install-deps chromium`      | 不报错              |
-| 浏览器   | `npx playwright install --dry-run chromium` | `already installed` |
-| 插件     | Manage → Plugins                            | 4 个 Enabled        |
-| 凭证     | Manage → Credentials                        | 5 个 Secret text    |
-| Git      | `git clone <仓库>`                          | clone 成功          |
-| 项目依赖 | `npm ci`                                    | 无 ERR              |
-| 构建     | Jenkins Build with Parameters               | 全绿                |
+**解决**：Dockerfile 设置 `ENV PLAYWRIGHT_BROWSERS_PATH=/opt/playwright-browsers`，浏览器装到固定路径。Jenkinsfile 同样加这个环境变量。
 
 ---
 
-## 十二、项目适配说明
+### 9.6 `.env` 里的 `localhost` 连接被拒
 
-本项目的 `playwright.config.ts` 已经为 CI 环境做好了适配，无需改动：
+```
+net::ERR_CONNECTION_REFUSED at http://localhost:5174/login
+```
 
-| 配置项       | CI 行为           | 本地行为 | 说明                    |
-| ------------ | ----------------- | -------- | ----------------------- |
-| `retries`    | 2 次重试          | 0 次     | `process.env.CI` 判断   |
-| `forbidOnly` | true              | false    | CI 禁止 `.only`         |
-| `reporter`   | HTML 报告         | 同       | `open: 'never'` 适合 CI |
-| `screenshot` | only-on-failure   | 同       | 省空间                  |
-| `trace`      | retain-on-failure | 同       | 失败可回溯              |
-| `timeout`    | 30s               | 同       | 合理阈值                |
+**原因**：本地 `.env` 文件（`BASE_URL=http://localhost:5174`）被打进 Docker 镜像。
+
+**解决**：`.dockerignore` 排除 `.env`，Jenkins 通过 `-e` 注入线上地址。
+
+---
+
+### 9.7 Jenkins 报 `permission denied` 访问 Docker
+
+```
+dial unix /var/run/docker.sock: connect: permission denied
+```
+
+**原因**：jenkins 用户不在 docker 组。
+
+**解决**：`sudo usermod -aG docker jenkins && sudo systemctl restart jenkins`
+
+---
+
+### 9.8 Jenkinsfile `failure` 块报 `No steps specified`
+
+```
+org.codehaus.groovy.control.MultipleCompilationErrorsException:
+No steps specified for branch @ line 87, column 17.
+```
+
+**原因**：`failure {}` 块内所有步都注释掉了，Jenkins Pipeline 语法要求 post 条件块至少有一个 step。
+
+**解决**：加个 `echo`：`failure { echo "测试失败！查看报告: ${env.BUILD_URL}" }`
+
+---
+
+### 9.9 Playwright 浏览器下载极慢
+
+```
+| 0% of 113.2 MiB  # 长时间卡住
+```
+
+**原因**：Playwright 从 `cdn.playwright.dev` 下载 Chromium（~300MB），国内带宽慢。
+
+**解决方案（按推荐度排序）**：
+
+1. **本地构建镜像传服务器**（推荐）：Mac 带宽快，构建完 `docker save` → `scp`。
+2. **`npm install @playwright/test` 前不下浏览器**：`PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm ci`，浏览器单独装到宿主机共享目录。
+3. 国内镜像（不稳定）：`PLAYWRIGHT_DOWNLOAD_HOST=https://npmmirror.com/mirrors/playwright/`，但镜像常缺少最新 Chromium 版本（404 NoSuchKey）。
+
+---
+
+### 9.10 测试全超时 `networkidle`
+
+```
+Error: page.waitForLoadState: Test timeout of 30000ms exceeded.
+```
+
+**原因**：`BasePage.navigate()` 使用 `networkidle`，要求 500ms 零网络活动。被测应用有长轮询/WebSocket 时永不触发。
+
+**解决**：`BasePage.ts` 中 `waitForLoadState('networkidle')` → `waitForLoadState('load')`，等待页面资源加载完即可。
+
+---
+
+## 十、宿主机验证速查
+
+| 检查项                 | 命令                              | 通过标准               |
+| ---------------------- | --------------------------------- | ---------------------- |
+| Java                   | `java --version`                  | `21.x`                 |
+| Jenkins                | `systemctl status jenkins`        | `active (running)`     |
+| Docker                 | `docker ps`                       | 不报错                 |
+| jenkins 有 docker 权限 | `sudo -u jenkins docker ps`       | 不报 permission denied |
+| 镜像存在               | `docker images playwright-runner` | 有记录                 |
+| 镜像能跑               | 见 5.4 验证命令                   | `14 passed`            |
