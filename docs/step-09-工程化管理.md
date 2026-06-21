@@ -251,11 +251,66 @@ jobs:
 
 > 本地开发读 `.env`，CI 环境读 GitHub Secrets，测试代码 `config.ts` 通过 `process.env` 统一读取，不需要改代码。
 
-### Jenkins `Jenkinsfile`
+### 关闭 GitHub Actions 的几种方式
+
+| 方式         | 操作                                                    | 效果                     |
+| ------------ | ------------------------------------------------------- | ------------------------ |
+| 删文件       | 删除 `.github/workflows/playwright.yml`                 | 彻底停止，不再触发       |
+| 仓库设置关闭 | Settings → Actions → General → **Disable actions**      | 所有工作流停用，文件保留 |
+| 单独停用     | 工作流页面 → 点 workflow → `···` → **Disable workflow** | 只停这一个，其他照常     |
+
+### Jenkins 部署教程
+
+#### 服务器环境
+
+| 组件         | 版本/说明                                        |
+| ------------ | ------------------------------------------------ |
+| 系统         | OpenCloudOS（CentOS 系）                         |
+| Node.js      | 20+                                              |
+| Java         | 21（Jenkins 运行需要）                           |
+| Jenkins 端口 | 8090                                             |
+| 插件         | NodeJS Plugin、Git Plugin、HTML Publisher Plugin |
+
+#### 安装 Jenkins
+
+```bash
+# 安装 Java 21（Jenkins 依赖）
+yum install -y java-21-openjdk
+
+# 安装 Playwright 系统依赖（Chromium 在 Linux 上需要）
+yum install -y mesa-libgbm libdrm atk cups-libs gtk3 nss nspr pango alsa-lib libX11 libxkbcommon
+```
+
+#### 配置 Node.js
+
+系统管理 → Tools → NodeJS 安装 → 新增 NodeJS：
+
+| 配置项   | 值                |
+| -------- | ----------------- |
+| 名称     | `Node20`          |
+| 安装目录 | `/usr/local/node` |
+
+#### 配置凭据
+
+系统管理 → Manage Credentials → 新增凭据（Secret text）：
+
+| 凭据 ID                  | Secret 值                       |
+| ------------------------ | ------------------------------- |
+| `testing-base-url`       | `https://testing.yechuiyan.com` |
+| `testing-admin-username` | `炊烟1号`                       |
+| `testing-admin-password` | `admin123`                      |
+| `testing-user-username`  | `炊烟2号`                       |
+| `testing-user-password`  | `user123`                       |
+
+#### `Jenkinsfile`
 
 ```groovy
 pipeline {
   agent any
+  tools { nodejs 'Node20' }
+
+  // 定时触发：工作日早 9 点
+  triggers { cron('H 9 * * 1-5') }
 
   environment {
     BASE_URL        = credentials('testing-base-url')
@@ -266,32 +321,66 @@ pipeline {
   }
 
   stages {
-    stage('Install') {
+    stage('安装依赖') {
       steps {
         sh 'npm ci'
         sh 'npx playwright install chromium --with-deps'
       }
     }
-    stage('Smoke') {
-      steps { sh 'npm run test:smoke' }
+
+    stage('冒烟测试') {
+      steps {
+        sh 'npm run test:smoke'
+      }
       post {
         failure {
-          emailext subject: "[冒烟失败] ${env.JOB_NAME}", body: env.BUILD_URL, to: 'dev-team@company.com'
+          echo '冒烟测试未通过，阻塞后续阶段'
         }
       }
     }
-    stage('Regression') {
-      steps { sh 'npm run test:regression' }
+
+    stage('回归测试') {
+      steps {
+        sh 'npm run test:regression'
+      }
+    }
+
+    stage('生成报告') {
+      steps {
+        sh 'npx playwright show-report reports/playwright-report'
+      }
     }
   }
 
   post {
     always {
       archiveArtifacts artifacts: 'reports/playwright-report/**', allowEmptyArchive: true
+      publishHTML(target: [
+        reportName: 'Playwright Report',
+        reportDir: 'reports/playwright-report',
+        reportFiles: 'index.html',
+      ])
+    }
+    failure {
+      echo '测试失败，请检查 Jenkins 控制台日志'
     }
   }
 }
 ```
+
+#### 执行流程
+
+```
+定时触发（工作日早 9 点）/ 手动构建
+  → git clone Automation-Course 代码
+  → npm ci 安装依赖
+  → npx playwright install chromium --with-deps
+  → 冒烟测试（P0）→ 失败则阻塞
+  → 回归测试（P0+P1）
+  → 生成 HTML 报告 → 归档
+```
+
+> 被测应用 `testing.yechuiyan.com` 已部署在线上，Jenkins 不需要启动本地服务，直接跑测试即可。
 
 ### 执行策略
 
