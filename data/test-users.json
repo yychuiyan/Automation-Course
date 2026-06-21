@@ -1,0 +1,12 @@
+{
+  "admin": {
+    "username": "炊烟1号",
+    "password": "admin123",
+    "role": "管理员"
+  },
+  "user": {
+    "username": "炊烟2号",
+    "password": "user123",
+    "role": "普通用户"
+  }
+}

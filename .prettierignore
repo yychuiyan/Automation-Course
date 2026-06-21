@@ -1,0 +1,8 @@
+node_modules/
+dist/
+reports/
+.history/
+test-results/
+playwright-report/
+auth-*.json
+.env

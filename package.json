@@ -1,0 +1,44 @@
+{
+  "name": "automation-course",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "test": "npx playwright test",
+    "test:smoke": "npx playwright test --grep '@p0'",
+    "test:regression": "npx playwright test --grep '@p0|@p1'",
+    "test:headed": "npx playwright test --headed",
+    "test:ui": "npx playwright test --ui",
+    "test:debug": "npx playwright test --debug",
+    "report": "npx playwright show-report",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "lint": "eslint tests/ pages/ utils/ ",
+    "lint:fix": "eslint tests/ pages/ utils/ fixtures/ --fix",
+    "prepare": "husky"
+  },
+  "lint-staged": {
+    "*.{ts,json,md,mjs,yaml}": [
+      "prettier --write",
+      "eslint --fix"
+    ]
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "devDependencies": {
+    "@commitlint/cli": "^21.0.2",
+    "@commitlint/config-conventional": "^21.0.2",
+    "@eslint/js": "^10.0.1",
+    "@playwright/test": "^1.60.0",
+    "@types/node": "^26.0.0",
+    "dotenv": "^17.4.2",
+    "eslint": "^10.5.0",
+    "husky": "^9.1.7",
+    "lint-staged": "^17.0.8",
+    "prettier": "^3.8.4",
+    "tsconfig-paths": "^4.2.0",
+    "typescript": "^6.0.3",
+    "typescript-eslint": "^8.61.1"
+  }
+}
