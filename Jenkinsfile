@@ -10,6 +10,7 @@ pipeline {
         ADMIN_PASSWORD     = credentials('TEST_ADMIN_PASSWORD')
         USER_USERNAME      = credentials('TEST_USER_USERNAME')
         USER_PASSWORD      = credentials('TEST_USER_PASSWORD')
+        PLAYWRIGHT_BROWSERS_PATH = '/opt/playwright-browsers'
         CI                      = 'true'
     }
 

@@ -16,6 +16,9 @@ COPY package.json package-lock.json ./
 # 确保 npm cache 目录存在且可写（Jenkins 以非 root 用户运行容器时需要）
 RUN mkdir -p /.npm && chmod 777 /.npm && npm ci
 
+# 浏览器安装到固定路径（非 /root/.cache），Jenkins 非 root 运行时也能找到
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/playwright-browsers
+
 # Playwright 自动识别 Debian 版本，用对系统依赖包名
 RUN npx playwright install-deps chromium
 
