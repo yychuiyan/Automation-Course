@@ -1,27 +1,47 @@
-name: Playwright Tests
-on:
+name: Playwright Tests                 # 工作流名称
+
+on:                                    # 触发条件
   push:
-    branches: [main, master]
+    branches: [master]                 # 推送到 master 时触发
   pull_request:
-    branches: [main, master]
+    branches: [master]                 # PR 到 master 时触发
+
 jobs:
-  test:
-    timeout-minutes: 60
-    runs-on: ubuntu-latest
+  smoke:                               # 任务名
+    timeout-minutes: 15                # 最多跑 15 分钟，超过杀掉
+    runs-on: ubuntu-latest             # 运行环境：Ubuntu 虚拟机
+
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v4      # 1. 拉取代码
+
+      - uses: actions/setup-node@v4    # 2. 装 Node.js
         with:
-          node-version: lts/*
-      - name: Install dependencies
-        run: npm ci
-      - name: Install Playwright Browsers
-        run: npx playwright install --with-deps
-      - name: Run Playwright tests
-        run: npx playwright test
-      - uses: actions/upload-artifact@v4
-        if: ${{ !cancelled() }}
+          node-version: 20
+
+      - name: Install dependencies     # 3. 装 npm 依赖
+        run: npm ci                    # ci 比 install 快，适合 CI 环境
+
+      - name: Install Playwright       # 4. 装 Chromium 浏览器
+        run: npx playwright install chromium --with-deps  # --with-deps 装系统级依赖（字体等）
+
+      - name: Format check             # 5. Prettier 格式检查
+        run: npm run format:check
+
+      - name: Lint                     # 6. ESLint 代码检查
+        run: npm run lint
+
+      - name: Smoke tests              # 7. 跑冒烟测试 P0
+        run: npm run test:smoke
+        env:                           # 环境变量从 GitHub Secrets 注入
+          BASE_URL: ${{ secrets.BASE_URL }}
+          ADMIN_USERNAME: ${{ secrets.ADMIN_USERNAME }}
+          ADMIN_PASSWORD: ${{ secrets.ADMIN_PASSWORD }}
+          USER_USERNAME: ${{ secrets.USER_USERNAME }}
+          USER_PASSWORD: ${{ secrets.USER_PASSWORD }}
+
+      - uses: actions/upload-artifact@v4  # 8. 失败时上传报告
+        if: failure()                     # 只在失败时执行
         with:
           name: playwright-report
-          path: playwright-report/
-          retention-days: 30
+          path: reports/playwright-report/
+          retention-days: 7               # 保留 7 天

@@ -94,7 +94,88 @@ auth-*.json
 
 ## 三、Git 提交规范
 
-husky + commitlint 强制 Conventional Commits 格式：
+### 安装
+
+```bash
+npm install -D husky lint-staged @commitlint/cli @commitlint/config-conventional
+```
+
+### `commitlint.config.mjs`（新增）
+
+```javascript
+export default {
+  extends: ['@commitlint/config-conventional'],
+  rules: {
+    'type-enum': [
+      2,
+      'always',
+      [
+        'feat', // 新功能
+        'fix', // 修复 bug
+        'docs', // 文档
+        'style', // 代码格式
+        'refactor', // 重构
+        'perf', // 性能优化
+        'test', // 增加测试
+        'chore', // 构建/工具
+        'revert', // 回退
+        'build', // 打包
+      ],
+    ],
+    'subject-case': [0],
+  },
+};
+```
+
+### 初始化 husky
+
+```bash
+npx husky init
+```
+
+### `.husky/pre-commit` — 提交前自动格式检查
+
+```bash
+npx lint-staged
+```
+
+### `.husky/commit-msg` — 提交时校验信息格式
+
+```bash
+npx --no -- commitlint --edit $1
+```
+
+### `package.json` 追加
+
+```json
+{
+  "lint-staged": {
+    "*.{ts,json,md,mjs,yaml}": ["prettier --write", "eslint --fix"]
+  }
+}
+```
+
+### `.gitignore` 追加
+
+```
+.husky/_
+```
+
+### 提交流程
+
+```
+git add .
+git commit -m "feat: 新增用户管理模块"
+    │
+    ▼  .husky/pre-commit → npx lint-staged（格式 + lint）
+    ▼  .husky/commit-msg → commitlint 校验格式
+    │
+    ├─ "feat: xxx"   ✅
+    ├─ "fix: xxx"    ✅
+    └─ "随便写"      ❌ 拦截
+```
+
+### 提交格式
 
 ```
 feat: 新增用户管理模块
