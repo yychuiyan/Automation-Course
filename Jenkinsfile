@@ -1,24 +1,16 @@
 pipeline {
-    agent any
+    // Docker 容器内运行：Node + Playwright + Chromium 全内置，环境零依赖
+    agent {
+        docker { image 'playwright-runner:latest' }
+    }
 
-    // 环境变量：从 Jenkins 凭证注入敏感信息，其余直接给默认值
     environment {
-        // ---- 被测环境 ----
-        BASE_URL = credentials('TEST_BASE_URL')
-
-        // ---- 管理员账号 ----
-        ADMIN_USERNAME = credentials('TEST_ADMIN_USERNAME')
-        ADMIN_PASSWORD = credentials('TEST_ADMIN_PASSWORD')
-
-        // ---- 普通用户账号 ----
-        USER_USERNAME = credentials('TEST_USER_USERNAME')
-        USER_PASSWORD = credentials('TEST_USER_PASSWORD')
-
-        // ---- Playwright 浏览器缓存路径（系统公共目录，多用户共享） ----
-        PLAYWRIGHT_BROWSERS_PATH = '/opt/playwright-browsers'
-
-        // ---- CI 标记（playwright.config.ts 里 process.env.CI 判断） ----
-        CI = 'true'
+        BASE_URL           = credentials('TEST_BASE_URL')
+        ADMIN_USERNAME     = credentials('TEST_ADMIN_USERNAME')
+        ADMIN_PASSWORD     = credentials('TEST_ADMIN_PASSWORD')
+        USER_USERNAME      = credentials('TEST_USER_USERNAME')
+        USER_PASSWORD      = credentials('TEST_USER_PASSWORD')
+        CI                 = 'true'
     }
 
     parameters {
@@ -38,15 +30,7 @@ pipeline {
 
         stage('Install Dependencies') {
             steps {
-                sh 'node --version'
-                sh 'npm --version'
                 sh 'npm ci'
-            }
-        }
-
-        stage('Install Playwright Browser') {
-            steps {
-                sh 'npx playwright install chromium'
             }
         }
 
@@ -71,10 +55,7 @@ pipeline {
 
     post {
         always {
-            // 归档测试产物
             archiveArtifacts artifacts: 'test-results/**, reports/**', allowEmptyArchive: true
-
-            // 发布 HTML 报告（需要 HTML Publisher 插件）
             publishHTML(
                 target: [
                     allowMissing: false,
@@ -86,7 +67,6 @@ pipeline {
                 ]
             )
         }
-
         failure {
             echo "测试失败！查看报告: ${env.BUILD_URL}"
         }
