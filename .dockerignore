@@ -1,0 +1,10 @@
+# 不入镜像：敏感信息通过 docker run -e 或 Jenkins 凭证注入
+.env
+auth-*.json
+node_modules/
+test-results/
+reports/
+.git/
+.history/
+*.tsbuildinfo
+dist/
