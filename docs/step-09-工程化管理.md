@@ -188,47 +188,68 @@ docs: 更新 README
 ### GitHub Actions `.github/workflows/playwright.yml`
 
 ```yaml
-name: Playwright Tests
+name: Playwright Tests # 工作流名称
 
-on:
+on: # 触发条件
   push:
-    branches: [main]
+    branches: [master] # 推送到 master 时触发
   pull_request:
-    branches: [main]
+    branches: [master] # PR 到 master 时触发
 
 jobs:
-  smoke:
-    runs-on: ubuntu-latest
+  smoke: # 任务名
+    timeout-minutes: 15 # 最多跑 15 分钟，超过杀掉
+    runs-on: ubuntu-latest # 运行环境：Ubuntu 虚拟机
+
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v4 # 1. 拉取代码
+
+      - uses: actions/setup-node@v4 # 2. 装 Node.js
         with:
           node-version: 20
 
-      - run: npm ci
-      - run: npx playwright install chromium --with-deps
+      - name: Install dependencies # 3. 装 npm 依赖
+        run: npm ci # ci 比 install 快，适合 CI 环境
 
-      - name: Format check
+      - name: Install Playwright # 4. 装 Chromium 浏览器
+        run: npx playwright install chromium --with-deps # --with-deps 装系统级依赖（字体等）
+
+      - name: Format check # 5. Prettier 格式检查
         run: npm run format:check
 
-      - name: Lint
+      - name: Lint # 6. ESLint 代码检查
         run: npm run lint
 
-      - name: Smoke tests
+      - name: Smoke tests # 7. 跑冒烟测试 P0
         run: npm run test:smoke
-        env:
+        env: # 环境变量从 GitHub Secrets 注入
           BASE_URL: ${{ secrets.BASE_URL }}
           ADMIN_USERNAME: ${{ secrets.ADMIN_USERNAME }}
           ADMIN_PASSWORD: ${{ secrets.ADMIN_PASSWORD }}
           USER_USERNAME: ${{ secrets.USER_USERNAME }}
           USER_PASSWORD: ${{ secrets.USER_PASSWORD }}
 
-      - uses: actions/upload-artifact@v4
-        if: failure()
+      - uses: actions/upload-artifact@v4 # 8. 失败时上传报告
+        if: failure() # 只在失败时执行
         with:
           name: playwright-report
           path: reports/playwright-report/
+          retention-days: 7 # 保留 7 天
 ```
+
+### GitHub Secrets 配置
+
+仓库 Settings → Secrets and variables → Actions → New repository secret：
+
+| Name             | Value                           |
+| ---------------- | ------------------------------- |
+| `BASE_URL`       | `https://testing.yechuiyan.com` |
+| `ADMIN_USERNAME` | `炊烟1号`                       |
+| `ADMIN_PASSWORD` | `admin123`                      |
+| `USER_USERNAME`  | `炊烟2号`                       |
+| `USER_PASSWORD`  | `user123`                       |
+
+> 本地开发读 `.env`，CI 环境读 GitHub Secrets，测试代码 `config.ts` 通过 `process.env` 统一读取，不需要改代码。
 
 ### Jenkins `Jenkinsfile`
 
