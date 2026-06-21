@@ -13,7 +13,7 @@ WORKDIR /app
 
 # 先拷贝依赖文件，利用 Docker 层缓存（代码改动不触发重装）
 COPY package.json package-lock.json ./
-RUN npm ci
+RUN npm ci && chmod -R 777 /.npm
 
 # Playwright 自动识别 Debian 版本，用对系统依赖包名
 RUN npx playwright install-deps chromium
