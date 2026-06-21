@@ -14,6 +14,9 @@ pipeline {
         USER_USERNAME = credentials('TEST_USER_USERNAME')
         USER_PASSWORD = credentials('TEST_USER_PASSWORD')
 
+        // ---- Playwright 浏览器缓存路径（系统公共目录，多用户共享） ----
+        PLAYWRIGHT_BROWSERS_PATH = '/opt/playwright-browsers'
+
         // ---- CI 标记（playwright.config.ts 里 process.env.CI 判断） ----
         CI = 'true'
     }
