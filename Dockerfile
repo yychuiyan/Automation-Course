@@ -18,8 +18,8 @@ RUN npm ci
 # Playwright 自动识别 Debian 版本，用对系统依赖包名
 RUN npx playwright install-deps chromium
 
-# 安装 Chromium 浏览器
-RUN npx playwright install chromium
+# 注意：Chromium 浏览器不在镜像内，通过 volume 挂载宿主机 /opt/playwright-browsers
+# 避免 CDN 下载慢、镜像体积膨胀。Jenkinsfile 已配置挂载 + 环境变量。
 
-# 最后拷贝业务代码（高频改动层放最后）
+# 拷贝业务代码（高频改动层放最后）
 COPY . .
