@@ -1,11 +1,7 @@
 pipeline {
     // Docker 容器内运行：Node + Playwright + Chromium 全内置，环境零依赖
     agent {
-        docker {
-            image 'playwright-runner:latest'
-            // 挂载宿主机浏览器缓存到容器，避免每次下载 Chromium（~300MB）
-            args '-v /opt/playwright-browsers:/opt/playwright-browsers'
-        }
+        docker { image 'playwright-runner:latest' }
     }
 
     environment {
@@ -14,7 +10,6 @@ pipeline {
         ADMIN_PASSWORD     = credentials('TEST_ADMIN_PASSWORD')
         USER_USERNAME      = credentials('TEST_USER_USERNAME')
         USER_PASSWORD      = credentials('TEST_USER_PASSWORD')
-        PLAYWRIGHT_BROWSERS_PATH = '/opt/playwright-browsers'
         CI                      = 'true'
     }
 
