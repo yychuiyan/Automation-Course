@@ -10,7 +10,8 @@ export class BasePage {
   // 导航到指定路径，等网络静默后继续
   async navigate(url: string) {
     await this.page.goto(url);
-    await this.page.waitForLoadState('networkidle');
+    // 使用 load 而非 networkidle：networkidle 在有长轮询/WebSocket 的页面容易超时
+    await this.page.waitForLoadState('load');
   }
 
   // 等表格数据加载完成（loading 消失 + 第一行可见）

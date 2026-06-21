@@ -1,61 +1,96 @@
 pipeline {
-  agent any
-  tools { nodejs 'Node20' }
+    agent any
 
-  // 定时触发：工作日早 9 点
-  // triggers { cron('H 9 * * 1-5') }
+    // 环境变量：从 Jenkins 凭证注入敏感信息，其余直接给默认值
+    environment {
+        // ---- 被测环境 ----
+        BASE_URL = credentials('TEST_BASE_URL')
 
-  environment {
-    BASE_URL        = credentials('testing-base-url')
-    ADMIN_USERNAME  = credentials('testing-admin-username')
-    ADMIN_PASSWORD  = credentials('testing-admin-password')
-    USER_USERNAME   = credentials('testing-user-username')
-    USER_PASSWORD   = credentials('testing-user-password')
-  }
+        // ---- 管理员账号 ----
+        ADMIN_USERNAME = credentials('TEST_ADMIN_USERNAME')
+        ADMIN_PASSWORD = credentials('TEST_ADMIN_PASSWORD')
 
-  stages {
-    stage('安装依赖') {
-      steps {
-        sh 'npm ci'
-        // sh 'npx playwright install chromium'
-      }
+        // ---- 普通用户账号 ----
+        USER_USERNAME = credentials('TEST_USER_USERNAME')
+        USER_PASSWORD = credentials('TEST_USER_PASSWORD')
+
+        // ---- CI 标记（playwright.config.ts 里 process.env.CI 判断） ----
+        CI = 'true'
     }
 
-    stage('冒烟测试') {
-      steps {
-        sh 'npm run test:smoke'
-      }
-      post {
-        failure {
-          echo '冒烟测试未通过，阻塞后续阶段'
+    parameters {
+        choice(
+            name: 'TEST_LEVEL',
+            choices: ['smoke', 'regression', 'full'],
+            description: 'smoke=P0冒烟(2min) | regression=P0+P1回归(5min) | full=全量(8min)'
+        )
+    }
+
+    stages {
+        stage('Checkout') {
+            steps {
+                checkout scm
+            }
         }
-      }
+
+        stage('Install Dependencies') {
+            steps {
+                sh 'node --version'
+                sh 'npm --version'
+                sh 'npm ci'
+            }
+        }
+
+        stage('Install Playwright Browser') {
+            steps {
+                sh 'npx playwright install chromium'
+            }
+        }
+
+        stage('Run Tests') {
+            steps {
+                script {
+                    switch (params.TEST_LEVEL) {
+                        case 'smoke':
+                            sh 'npm run test:smoke'
+                            break
+                        case 'regression':
+                            sh 'npm run test:regression'
+                            break
+                        case 'full':
+                            sh 'npm test'
+                            break
+                    }
+                }
+            }
+        }
     }
 
-    stage('回归测试') {
-      steps {
-        sh 'npm run test:regression'
-      }
-    }
+    post {
+        always {
+            // 归档测试产物
+            archiveArtifacts artifacts: 'test-results/**, reports/**', allowEmptyArchive: true
 
-    stage('生成报告') {
-      steps {
-        sh 'npx playwright show-report reports/playwright-report'
-      }
-    }
-  }
+            // 发布 HTML 报告（需要 HTML Publisher 插件）
+            publishHTML(
+                target: [
+                    allowMissing: false,
+                    alwaysLinkToLastBuild: true,
+                    keepAll: true,
+                    reportDir: 'reports/playwright-report',
+                    reportFiles: 'index.html',
+                    reportName: 'Playwright Test Report'
+                ]
+            )
+        }
 
-  post {
-    always {
-      archiveArtifacts artifacts: 'reports/playwright-report/**', allowEmptyArchive: true
-      publishHTML(target: [
-        reportName: 'Playwright Report',
-        reportDir: 'reports/playwright-report',
-        reportFiles: 'index.html',
-      ])
+        failure {
+            // 失败通知 — 打开注释并配好 SMTP 即可用
+            // emailext(
+            //     subject: "[Test Failed] ${env.JOB_NAME} - Build #${env.BUILD_NUMBER}",
+            //     body: "测试失败，查看报告: ${env.BUILD_URL}",
+            //     to: 'team@example.com'
+            // )
+        }
     }
-    failure {
-      echo '测试失败，请检查 Jenkins 控制台日志'
-    }
-  }
 }
