@@ -13,7 +13,8 @@ WORKDIR /app
 
 # 先拷贝依赖文件，利用 Docker 层缓存（代码改动不触发重装）
 COPY package.json package-lock.json ./
-RUN npm ci && chmod -R 777 /.npm
+# 确保 npm cache 目录存在且可写（Jenkins 以非 root 用户运行容器时需要）
+RUN mkdir -p /.npm && chmod 777 /.npm && npm ci
 
 # Playwright 自动识别 Debian 版本，用对系统依赖包名
 RUN npx playwright install-deps chromium
