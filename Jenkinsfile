@@ -17,7 +17,7 @@ pipeline {
     stage('安装依赖') {
       steps {
         sh 'npm ci'
-        sh 'npx playwright install chromium'
+        // sh 'npx playwright install chromium'
       }
     }
 
