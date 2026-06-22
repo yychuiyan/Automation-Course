@@ -2,6 +2,9 @@ import 'dotenv/config';
 import 'tsconfig-paths/register';
 import { defineConfig, devices } from '@playwright/test';
 
+// Allure 报告输出目录
+process.env.ALLURE_RESULTS_DIR = 'reports/allure-results';
+
 export default defineConfig({
   // 测试文件目录，用例统一放在 tests/ 下
   testDir: './tests',
@@ -24,8 +27,11 @@ export default defineConfig({
   // CI 上禁止 test.only，防止调试代码被合入
   forbidOnly: !!process.env.CI,
 
-  // 报告器：HTML 报告输出到 reports/，跑完不自动打开浏览器
-  reporter: [['html', { outputFolder: 'reports/playwright-report', open: 'never' }]],
+  // 报告器：HTML + Allure 双报告
+  reporter: [
+    ['html', { outputFolder: 'reports/playwright-report', open: 'never' }],
+    ['allure-playwright', { resultsDir: 'reports/allure-results' }],
+  ],
 
   // 全局行为，所有用例共享
   use: {
@@ -77,6 +83,24 @@ export default defineConfig({
         storageState: 'auth-admin.json',
       },
       // 等 setup 跑完才执行
+      dependencies: ['setup'],
+    },
+    // edge 边界用例
+    {
+      name: 'chromium-edge',
+      testMatch: /edge\//,
+      testIgnore: /login\.spec\.ts/,
+      use: {
+        ...devices['Desktop Chrome'],
+        storageState: 'auth-admin.json',
+      },
+      dependencies: ['setup'],
+    },
+    // edge 登录边界：不走 storageState
+    {
+      name: 'chromium-edge-login',
+      testMatch: /edge\/login\.spec\.ts/,
+      use: { ...devices['Desktop Chrome'] },
       dependencies: ['setup'],
     },
     /**

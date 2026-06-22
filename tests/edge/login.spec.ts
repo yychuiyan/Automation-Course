@@ -4,6 +4,7 @@ import { config } from '@/utils/config';
 
 test.describe('登录-边界', async () => {
   let loginPage: LoginPage;
+
   test.beforeEach(async ({ page }) => {
     loginPage = new LoginPage(page);
     await loginPage.goto();

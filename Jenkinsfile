@@ -17,8 +17,8 @@ pipeline {
     parameters {
         choice(
             name: 'TEST_LEVEL',
-            choices: ['smoke', 'regression', 'full'],
-            description: 'smoke=P0冒烟(2min) | regression=P0+P1回归(5min) | full=全量(8min)'
+            choices: ['smoke', 'regression', 'edge', 'full'],
+            description: 'smoke=P0冒烟(2min) | regression=P0+P1回归(5min) | edge=P2边界(1min) | full=全量(8min)'
         )
     }
 
@@ -48,6 +48,9 @@ pipeline {
                         case 'full':
                             sh 'npm test'
                             break
+                        case 'edge':
+                            sh 'npm run test:edge'
+                            break
                     }
                 }
             }
@@ -56,7 +59,9 @@ pipeline {
 
     post {
         always {
+            sh 'npx allure generate reports/allure-results -o reports/allure-report --clean'
             archiveArtifacts artifacts: 'test-results/**, reports/**', allowEmptyArchive: true
+            allure includeProperties: false, results: [[path: 'reports/allure-results']]
             publishHTML(
                 target: [
                     allowMissing: false,

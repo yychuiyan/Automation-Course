@@ -1,9 +1,5 @@
 # 第9步：工程化管理
 
----
-
----
-
 ## 一、ESLint 代码检查
 
 ### 安装
@@ -259,9 +255,197 @@ jobs:
 | 仓库设置关闭 | Settings → Actions → General → **Disable actions**      | 所有工作流停用，文件保留 |
 | 单独停用     | 工作流页面 → 点 workflow → `···` → **Disable workflow** | 只停这一个，其他照常     |
 
+### Jenkins 部署教程
+
+#### 服务器环境
+
+| 组件         | 版本/说明                                                       |
+| ------------ | --------------------------------------------------------------- |
+| 系统         | OpenCloudOS（CentOS 系）                                        |
+| Node.js      | 20+                                                             |
+| Java         | 21（Jenkins 运行需要）                                          |
+| Jenkins 端口 | 8090                                                            |
+| 插件         | NodeJS Plugin、Git Plugin、HTML Publisher Plugin、Allure Plugin |
+
+#### 安装 Jenkins
+
+```bash
+# 1. 安装 Java 21
+yum install -y java-21-openjdk
+
+# 2. 添加 Jenkins 仓库并安装
+wget -O /etc/yum.repos.d/jenkins.repo https://pkg.jenkins.io/redhat-stable/jenkins.repo
+rpm --import https://pkg.jenkins.io/redhat-stable/jenkins.io-2023.key
+yum install -y jenkins
+
+# 3. 端口冲突则改 8090
+sed -i 's/JENKINS_PORT=8080/JENKINS_PORT=8090/' /usr/lib/systemd/system/jenkins.service
+
+# 4. 指定 Java 路径
+mkdir -p /etc/systemd/system/jenkins.service.d
+cat > /etc/systemd/system/jenkins.service.d/override.conf << 'EOF'
+[Service]
+Environment="JAVA_HOME=/usr/lib/jvm/java-21-openjdk"
+EOF
+
+# 5. 启动
+systemctl daemon-reload
+systemctl start jenkins
+systemctl enable jenkins
+
+# 6. 初始密码
+cat /var/lib/jenkins/secrets/initialAdminPassword
+
+# 7. Playwright 系统依赖
+yum install -y mesa-libgbm libdrm atk cups-libs gtk3 nss nspr pango alsa-lib libX11 libxkbcommon
+```
+
+浏览器访问 `http://<服务器IP>:8090`，输入初始密码，安装推荐插件。
+
+#### 配置 Node.js
+
+系统管理 → Tools → NodeJS 安装 → 新增：名称 `Node20`，选自动安装 NodeJS 20.x。
+
+#### 配置凭据
+
+系统管理 → Manage Credentials →（建议建 Folder 隔离）→ 添加 Secret text：
+
+| 凭据 ID                  | Secret                          |
+| ------------------------ | ------------------------------- |
+| `testing-base-url`       | `https://testing.yechuiyan.com` |
+| `testing-admin-username` | `炊烟1号`                       |
+| `testing-admin-password` | `admin123`                      |
+| `testing-user-username`  | `炊烟2号`                       |
+| `testing-user-password`  | `user123`                       |
+
+#### 创建 Pipeline Job
+
+Jenkins → 新建 Item → 输入名称 → 选择 **Pipeline**。
+Pipeline → Definition → **Pipeline script from SCM** → SCM 选 Git → 填入仓库地址 → Branches 填 `*/master` → Script Path 填 `Jenkinsfile`。
+
+#### `Jenkinsfile`
+
+```groovy
+pipeline {
+  agent any
+  tools { nodejs 'Node20' }
+
+  environment {
+    BASE_URL        = credentials('testing-base-url')
+    ADMIN_USERNAME  = credentials('testing-admin-username')
+    ADMIN_PASSWORD  = credentials('testing-admin-password')
+    USER_USERNAME   = credentials('testing-user-username')
+    USER_PASSWORD   = credentials('testing-user-password')
+  }
+
+  stages {
+    stage('安装依赖') {
+      steps {
+        sh 'npm ci'
+      }
+    }
+    stage('冒烟测试') {
+      steps { sh 'npm run test:smoke' }
+    }
+    stage('回归测试') {
+      steps { sh 'npm run test:regression' }
+    }
+    stage('生成报告') {
+      steps {
+        sh 'npx allure generate reports/allure-results -o reports/allure-report --clean'
+      }
+    }
+  }
+
+  post {
+    always {
+      archiveArtifacts artifacts: 'reports/playwright-report/**', allowEmptyArchive: true
+      allure includeProperties: false, results: [[path: 'reports/allure-results']]
+      publishHTML(target: [
+        reportName: 'Playwright Report',
+        reportDir: 'reports/playwright-report',
+        reportFiles: 'index.html',
+      ])
+    }
+  }
+}
+```
+
+### 执行策略
+
+```
+PR 提交  → 冒烟 P0     ← 5 分钟内
+每日凌晨 → 回归 P0+P1  ← 20 分钟内
+发版前   → 全量
+```
+
 ---
 
-## 五、BasePage 改造
+## 五、Allure 报告
+
+### 安装
+
+```bash
+npm install -D allure-playwright
+```
+
+### `playwright.config.ts` 追加
+
+```typescript
+reporter: [
+  ['html', { outputFolder: 'reports/playwright-report', open: 'never' }],
+  // 注意：allure-playwright 使用 resultsDir，不是 outputFolder
+  // 写错字段名不会报错，但结果会静默落到根目录 allure-results/ 下
+  ['allure-playwright', { resultsDir: 'reports/allure-results' }],
+],
+```
+
+### `package.json` scripts
+
+```json
+{
+  "report:allure": "npx allure generate reports/allure-results -o reports/allure-report --clean && npx allure open reports/allure-report"
+}
+```
+
+### Jenkins 服务器安装 Allure
+
+```bash
+wget https://github.com/allure-framework/allure2/releases/download/2.32.2/allure-2.32.2.tgz
+tar -xzf allure-2.32.2.tgz -C /opt/
+ln -s /opt/allure-2.32.2/bin/allure /usr/local/bin/allure
+```
+
+### Jenkins 插件 + 工具配置
+
+Jenkins → 系统管理 → Plugins → 安装 **Allure Plugin**。
+系统管理 → Tools → Allure Commandline → 新增：
+
+| 配置项   | 值                   |
+| -------- | -------------------- |
+| Name     | `Allure`             |
+| 安装目录 | `/opt/allure-2.32.2` |
+
+### Jenkinsfile post 阶段追加
+
+```groovy
+post {
+    always {
+        sh 'npx allure generate reports/allure-results -o reports/allure-report --clean'
+        allure includeProperties: false, results: [[path: 'reports/allure-results']]
+    }
+}
+```
+
+### 本地查看
+
+```bash
+npm run report:allure
+```
+
+---
+
+## 六、BasePage 改造
 
 ### `pages/BasePage.ts`（新增）
 
@@ -275,10 +459,11 @@ import { Page } from '@playwright/test';
 export class BasePage {
   constructor(protected page: Page) {}
 
-  // 导航到指定路径，等网络静默后继续
+  // 导航到指定路径，等页面加载完成后继续
+  // 使用 load 而非 networkidle：networkidle 在有长轮询/WebSocket 的页面容易超时
   async navigate(url: string) {
     await this.page.goto(url);
-    await this.page.waitForLoadState('networkidle');
+    await this.page.waitForLoadState('load');
   }
 
   // 等表格数据加载完成（loading 消失 + 第一行可见）
@@ -297,10 +482,10 @@ export class BasePage {
 }
 ```
 
-| 方法                   | 作用                                     | 场景                       |
-| ---------------------- | ---------------------------------------- | -------------------------- |
-| `navigate(url)`        | goto + `waitForLoadState('networkidle')` | 所有页面导航统一入口       |
-| `waitForTableLoaded()` | 等 loading 消失 + 表格第一行出现         | 列表页数据加载完成后再断言 |
+| 方法                   | 作用                              | 场景                       |
+| ---------------------- | --------------------------------- | -------------------------- |
+| `navigate(url)`        | goto + `waitForLoadState('load')` | 所有页面导航统一入口       |
+| `waitForTableLoaded()` | 等 loading 消失 + 表格第一行出现  | 列表页数据加载完成后再断言 |
 
 ### Page 类改造
 
@@ -309,18 +494,14 @@ export class BasePage {
 ### 改造好处
 
 1. **消除重复** — 9 个 `constructor(public page: Page)` 收敛为父类一行
-2. **解决 beforeCount = 0** — `navigate()` 自动等网络静默，批量并行不再读到空表格
+2. **解决 beforeCount = 0** — `navigate()` 自动等页面加载完成，批量并行不再读到空表格
 3. **统一导航入口** — 后续加全局逻辑（日志、超时）只改 BasePage
 4. **`waitForTableLoaded`** — 统一处理 Ant Design 表格加载态
 
-## 六、Fixture 改造
-
-Playwright `test.extend` 注入 Page 对象，省去用例中手动 `new`。当前项目规模暂不需要，Page 类和用例数量超过 15 个文件后再考虑。
-
-## 七、README 项目文档（待写）
-
-项目概览、快速开始、目录结构、常用命令、执行策略。
+---
 
 ---
 
-## 八、待办
+## 七、Fixture 改造（待办）
+
+Playwright `test.extend` 注入 Page 对象，省去用例中手动 `new`。当前项目规模暂不需要，Page 类和用例数量超过 15 个文件后再考虑。
